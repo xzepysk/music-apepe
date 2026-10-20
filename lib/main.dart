@@ -101,10 +101,12 @@ class Store extends ChangeNotifier {
     Api.onExpired = () { token = null; Api.token = null; sp.remove('token'); notifyListeners(); };
     handler.onNext = next; handler.onPrev = prev;
     handler.onDone = () { if (repeat) { handler.p.seek(Duration.zero); handler.p.play(); } else { next(); } };
-    final al = AppLinks();
-    al.uriLinkStream.listen(open);
-    final first = await al.getInitialLink();
-    if (first != null) pending = first;
+    try {
+      final al = AppLinks();
+      al.uriLinkStream.listen(open, onError: (_) {});
+      final first = await al.getInitialLink().timeout(const Duration(seconds: 2), onTimeout: () => null);
+      if (first != null) pending = first;
+    } catch (_) {}
     ready = true; notifyListeners();
     if (token != null) { await loadLib(); if (pending != null) { final p = pending!; pending = null; open(p); } }
   }
@@ -241,7 +243,7 @@ class MyApp extends StatefulWidget {
   @override State<MyApp> createState() => _MyAppState();
 }
 class _MyAppState extends State<MyApp> {
-  @override void initState() { super.initState(); S.init(); }
+  @override void initState() { super.initState(); S.init().whenComplete(() { if (!S.ready) { S.ready = true; S.notifyListeners(); } }); }
   @override Widget build(BuildContext c) => MaterialApp(
         title: 'Sync-musiC', debugShowCheckedModeBanner: false, scaffoldMessengerKey: mk,
         theme: ThemeData(brightness: Brightness.dark, useMaterial3: true, scaffoldBackgroundColor: cBg, colorScheme: const ColorScheme.dark(primary: cAc2, secondary: cAc, surface: cPanel)),
