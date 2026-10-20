@@ -5,7 +5,6 @@ import 'dart:math';
 import 'package:app_links/app_links.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -13,7 +12,6 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const base = 'https://music.thesync.my.id';
-const webClientId = String.fromEnvironment('GOOGLE_WEB_CLIENT_ID');
 const cBg = Color(0xFF050816), cPanel = Color(0xFF0A1130), cCard = Color(0xFF0F1A45);
 const cAc = Color(0xFF3B82F6), cAc2 = Color(0xFF38BDF8), cMu = Color(0xFF8FA0CC);
 const langs = {'': 'Off', 'id': 'Indonesian', 'en': 'English', 'ms': 'Malay', 'ja': 'Japanese', 'ko': 'Korean', 'zh-CN': 'Chinese', 'es': 'Spanish', 'fr': 'French', 'de': 'German', 'ar': 'Arabic', 'hi': 'Hindi', 'th': 'Thai'};
@@ -98,8 +96,10 @@ class Store extends ChangeNotifier {
     final u = sp.getString('user');
     if (u != null) user = jsonDecode(u);
     Api.token = token;
-    Api.onExpired = () { token = null; Api.token = null; sp.remove('token'); notifyListeners(); };
+    Api.onExpired = () { if (!_guesting) { token = null; Api.token = null; guest(); } };
     handler.onNext = next; handler.onPrev = prev;
+    if (token == null) await guest();
+    _readLib();
     handler.onDone = () { if (repeat) { handler.p.seek(Duration.zero); handler.p.play(); } else { next(); } };
     try {
       final al = AppLinks();
@@ -108,7 +108,7 @@ class Store extends ChangeNotifier {
       if (first != null) pending = first;
     } catch (_) {}
     ready = true; notifyListeners();
-    if (token != null) { await loadLib(); if (pending != null) { final p = pending!; pending = null; open(p); } }
+    if (pending != null) { final p = pending!; pending = null; open(p); }
   }
 
   Future<void> open(Uri u) async {
@@ -124,34 +124,26 @@ class Store extends ChangeNotifier {
     } catch (_) { toast('Could not open shared song'); }
   }
 
-  Future<void> login() async {
+  bool _guesting = false;
+  Future<void> guest() async {
+    _guesting = true;
     try {
-      final acc = await GoogleSignIn(serverClientId: webClientId, scopes: ['email']).signIn();
-      if (acc == null) return;
-      final idt = (await acc.authentication).idToken;
-      final r = await http.post(Uri.parse('$base/api/mobile/login'), headers: {'Content-Type': 'application/json'}, body: jsonEncode({'idToken': idt}));
-      final j = jsonDecode(r.body);
-      if (r.statusCode != 200) throw j['error'] ?? 'server error';
-      token = j['token']; user = j['user']; Api.token = token;
-      sp.setString('token', token!); sp.setString('user', jsonEncode(user));
-      notifyListeners();
-      await loadLib();
-      if (pending != null) { final p = pending!; pending = null; open(p); }
-    } catch (e) { toast('Login failed: $e'); }
+      final r = await http.post(Uri.parse('$base/api/mobile/guest')).timeout(const Duration(seconds: 20));
+      token = jsonDecode(r.body)['token']; Api.token = token; sp.setString('token', token!);
+    } catch (_) {}
+    _guesting = false;
   }
 
-  Future<void> logout() async {
-    try { await GoogleSignIn().signOut(); } catch (_) {}
-    await handler.stop();
-    token = null; Api.token = null; sp.remove('token'); queue = []; index = -1; notifyListeners();
+  void _readLib() {
+    List<Track> m(String k) { try { return (jsonDecode(sp.getString(k) ?? '[]') as List).map((e) => Track.fromJson(e)).toList(); } catch (_) { return []; } }
+    liked = m('liked'); recent = m('recent');
   }
-
-  void _lib(dynamic r) {
-    List<Track> m(dynamic l) => ((l ?? []) as List).map((e) => Track.fromJson(e)).toList();
-    liked = m(r['liked']); recent = m(r['recent']); notifyListeners();
+  void _saveLib() {
+    sp.setString('liked', jsonEncode(liked.map((t) => t.toJson()).toList()));
+    sp.setString('recent', jsonEncode(recent.map((t) => t.toJson()).toList()));
+    notifyListeners();
   }
-  Future<void> loadLib() async { try { _lib(await Api.get('/api/library')); } catch (_) {} }
-  Future<void> toggleLike(Track t) async { try { _lib(await Api.post('/api/library', {'op': 'like', 'track': t.toJson()})); } catch (_) {} }
+  Future<void> toggleLike(Track t) async { liked = isLiked(t.id) ? liked.where((x) => x.id != t.id).toList() : [t, ...liked]; _saveLib(); }
 
   Future<void> play(List<Track> l, int i) async { queue = l; index = i; await _load(); }
   void next() { if (queue.isEmpty) return; index = shuffle ? Random().nextInt(queue.length) : (index + 1) % queue.length; _load(); }
@@ -177,7 +169,7 @@ class Store extends ChangeNotifier {
       await handler.p.setUrl(u);
       if (my != _tick) return;
       handler.p.play();
-      Api.post('/api/library', {'op': 'recent', 'track': t.toJson()}).then(_lib).catchError((_) {});
+      recent = [t, ...recent.where((x) => x.id != t.id)].take(12).toList(); _saveLib();
     } catch (e) { if (my == _tick) toast('Playback failed: $e'); }
     if (my == _tick) { loading = false; notifyListeners(); }
   }
@@ -247,7 +239,7 @@ class _MyAppState extends State<MyApp> {
   @override Widget build(BuildContext c) => MaterialApp(
         title: 'Sync-musiC', debugShowCheckedModeBanner: false, scaffoldMessengerKey: mk,
         theme: ThemeData(brightness: Brightness.dark, useMaterial3: true, scaffoldBackgroundColor: cBg, colorScheme: const ColorScheme.dark(primary: cAc2, secondary: cAc, surface: cPanel)),
-        home: ListenableBuilder(listenable: S, builder: (_, __) => !S.ready ? const Scaffold() : S.token == null ? const LoginPage() : const Shell()),
+        home: ListenableBuilder(listenable: S, builder: (_, __) => !S.ready ? const Scaffold() : const Shell()),
       );
 }
 
@@ -256,24 +248,6 @@ Widget pic(String u, {double? size, double r = 8}) {
   return ClipRRect(borderRadius: BorderRadius.circular(r), child: u.isEmpty ? ph : Image.network(Api.img(u), width: size, height: size, fit: BoxFit.cover, headers: {'Cookie': Api.cookie}, errorBuilder: (_, __, ___) => ph));
 }
 const grad = LinearGradient(colors: [cAc, cAc2]);
-
-class LoginPage extends StatelessWidget {
-  const LoginPage({super.key});
-  @override Widget build(BuildContext c) => Scaffold(
-        body: Container(
-          decoration: const BoxDecoration(gradient: RadialGradient(center: Alignment(0, -1), radius: 1.2, colors: [Color(0xFF14409F), cBg, Colors.black], stops: [0, .6, 1])),
-          child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-            ClipRRect(borderRadius: BorderRadius.circular(22), child: Image.asset('assets/logo.png', width: 96, height: 96)),
-            const SizedBox(height: 16),
-            const Text('Sync-musiC', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 6),
-            const Text('Music without ads.', style: TextStyle(color: cMu)),
-            const SizedBox(height: 28),
-            FilledButton.icon(onPressed: S.login, icon: const Icon(Icons.login), label: const Text('Sign in with Google'), style: FilledButton.styleFrom(backgroundColor: cAc, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14))),
-          ])),
-        ),
-      );
-}
 
 class Shell extends StatefulWidget {
   const Shell({super.key});
@@ -336,7 +310,7 @@ class _HomeTabState extends State<HomeTab> {
     final h = DateTime.now().hour;
     final hi = h < 11 ? 'Good morning' : h < 15 ? 'Good afternoon' : h < 19 ? 'Good evening' : 'Good night';
     return ListView(padding: const EdgeInsets.all(16), children: [
-      Row(children: [Expanded(child: Text(hi, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800))), IconButton(icon: const Icon(Icons.logout), onPressed: S.logout)]),
+      Text(hi, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
       if (S.recent.isNotEmpty) ...[
         const SizedBox(height: 8),
         Wrap(spacing: 10, runSpacing: 10, children: [
