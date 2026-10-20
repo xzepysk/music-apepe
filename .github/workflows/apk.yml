@@ -8,7 +8,7 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - uses: subosito/flutter-action@v2
-        with: { flutter-version: 3.24.5, channel: stable, cache: true }
+        with: { channel: stable, cache: true }
       - run: flutter create . --org com.thesync --project-name music --platforms=android
       - run: python3 tool/setup_android.py
       - run: flutter pub get
