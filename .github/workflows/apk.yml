@@ -13,5 +13,7 @@ jobs:
       - run: python3 tool/setup_android.py
       - run: flutter pub get
       - run: flutter build apk --release --dart-define=GOOGLE_WEB_CLIENT_ID=${{ vars.GOOGLE_WEB_CLIENT_ID }}
+      - name: Show signing SHA1
+        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | grep -E "SHA1|SHA256"
       - uses: actions/upload-artifact@v4
         with: { name: Sync-musiC-apk, path: build/app/outputs/flutter-apk/app-release.apk }
