@@ -27,7 +27,8 @@ class Api {
   static Map<String, String> get h => {'Cookie': cookie, 'Content-Type': 'application/json'};
   static String img(String u) => '$base/api/img?u=${enc(u)}';
   static dynamic _out(http.Response r) {
-    if (r.statusCode == 401) { onExpired?.call(); throw 'Session expired'; }
+    if (r.statusCode == 401) { onExpired?.call(); throw 'Session expired, tap Retry'; }
+    if (r.statusCode != 200) throw 'Server error ${r.statusCode}';
     return jsonDecode(utf8.decode(r.bodyBytes));
   }
   static Future<dynamic> get(String p) async => _out(await http.get(Uri.parse('$base$p'), headers: h).timeout(const Duration(seconds: 60)));
@@ -87,6 +88,7 @@ class Store extends ChangeNotifier {
   String tl = '';
   int index = -1, _tick = 0;
   Uri? pending;
+  String? gErr;
   Track? get cur => index >= 0 && index < queue.length ? queue[index] : null;
   bool isLiked(String id) => liked.any((t) => t.id == id);
 
@@ -129,8 +131,9 @@ class Store extends ChangeNotifier {
     _guesting = true;
     try {
       final r = await http.post(Uri.parse('$base/api/mobile/guest')).timeout(const Duration(seconds: 20));
-      token = jsonDecode(r.body)['token']; Api.token = token; sp.setString('token', token!);
-    } catch (_) {}
+      if (r.statusCode != 200) throw 'guest route ${r.statusCode} (deploy the site update)';
+      token = jsonDecode(r.body)['token']; Api.token = token; sp.setString('token', token!); gErr = null;
+    } catch (e) { gErr = '$e'; }
     _guesting = false;
   }
 
@@ -249,23 +252,49 @@ Widget pic(String u, {double? size, double r = 8}) {
 }
 const grad = LinearGradient(colors: [cAc, cAc2]);
 
+class FadeIn extends StatelessWidget {
+  final Widget child; final int i;
+  const FadeIn({super.key, required this.child, this.i = 0});
+  @override Widget build(BuildContext c) => TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1), duration: Duration(milliseconds: 350 + min(i, 8) * 60), curve: Curves.easeOutCubic,
+        builder: (_, v, ch) => Opacity(opacity: v, child: Transform.translate(offset: Offset(0, 18 * (1 - v)), child: ch)), child: child);
+}
+
+class Press extends StatefulWidget {
+  final Widget child; final VoidCallback onTap;
+  const Press({super.key, required this.child, required this.onTap});
+  @override State<Press> createState() => _PressState();
+}
+class _PressState extends State<Press> {
+  bool d = false;
+  @override Widget build(BuildContext c) => GestureDetector(
+        onTapDown: (_) => setState(() => d = true), onTapCancel: () => setState(() => d = false), onTapUp: (_) => setState(() => d = false), onTap: widget.onTap,
+        child: AnimatedScale(scale: d ? .94 : 1, duration: const Duration(milliseconds: 120), child: widget.child));
+}
+
+Widget heart(bool on, Color off) => AnimatedSwitcher(
+      duration: const Duration(milliseconds: 250), transitionBuilder: (c, a) => ScaleTransition(scale: a, child: c),
+      child: Icon(on ? Icons.favorite : Icons.favorite_border, key: ValueKey(on), color: on ? cAc2 : off));
+
 class Shell extends StatefulWidget {
   const Shell({super.key});
   @override State<Shell> createState() => _ShellState();
 }
-class _ShellState extends State<Shell> {
+class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
   int tab = 0;
+  late final AnimationController fade = AnimationController(vsync: this, duration: const Duration(milliseconds: 280), value: 1);
+  @override void dispose() { fade.dispose(); super.dispose(); }
   @override Widget build(BuildContext c) => ListenableBuilder(
         listenable: S,
         builder: (_, __) => Scaffold(
           body: Container(
             decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF123A9C), Color(0xFF081A52), Color(0xFF03050F)], stops: [0, .35, 1])),
-            child: SafeArea(bottom: false, child: IndexedStack(index: tab, children: const [HomeTab(), SearchTab(), LibraryTab()])),
+            child: SafeArea(bottom: false, child: FadeTransition(opacity: fade, child: IndexedStack(index: tab, children: const [HomeTab(), SearchTab(), LibraryTab()]))),
           ),
           bottomNavigationBar: Column(mainAxisSize: MainAxisSize.min, children: [
             const MiniPlayer(),
             NavigationBar(
-              backgroundColor: const Color(0xFF03061A), selectedIndex: tab, onDestinationSelected: (i) => setState(() => tab = i),
+              backgroundColor: const Color(0xFF03061A), selectedIndex: tab, onDestinationSelected: (i) { setState(() => tab = i); fade.forward(from: 0); },
               destinations: const [
                 NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
                 NavigationDestination(icon: Icon(Icons.search), label: 'Search'),
@@ -284,13 +313,13 @@ class TrackTile extends StatelessWidget {
   const TrackTile(this.list, this.k, {super.key});
   @override Widget build(BuildContext c) {
     final t = list[k], on = S.cur?.id == t.id;
-    return ListTile(
+    return FadeIn(i: k, child: ListTile(
       leading: pic(t.cover, size: 48, r: 6),
       title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, color: on ? cAc2 : null)),
       subtitle: Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: cMu)),
-      trailing: IconButton(icon: Icon(S.isLiked(t.id) ? Icons.favorite : Icons.favorite_border, color: S.isLiked(t.id) ? cAc2 : cMu), onPressed: () => S.toggleLike(t)),
+      trailing: IconButton(icon: heart(S.isLiked(t.id), cMu), onPressed: () => S.toggleLike(t)),
       onTap: () => S.play(list, k),
-    );
+    ));
   }
 }
 
@@ -300,17 +329,24 @@ class HomeTab extends StatefulWidget {
 }
 class _HomeTabState extends State<HomeTab> {
   Map<String, List<Track>> shelves = {};
-  @override void initState() {
-    super.initState();
+  String? err;
+  void load() {
+    err = null; shelves = {};
     for (final q in shelfQ) {
-      Api.get('/api/search?type=track&q=${enc(q)}').then((r) { if (mounted) setState(() => shelves[q] = tracks(r)); }).catchError((_) {});
+      Api.get('/api/search?type=track&q=${enc(q)}').then((r) { if (mounted) setState(() => shelves[q] = tracks(r)); }).catchError((e) { if (mounted) setState(() => err = '$e'); });
     }
   }
+  @override void initState() { super.initState(); load(); }
   @override Widget build(BuildContext c) {
     final h = DateTime.now().hour;
     final hi = h < 11 ? 'Good morning' : h < 15 ? 'Good afternoon' : h < 19 ? 'Good evening' : 'Good night';
     return ListView(padding: const EdgeInsets.all(16), children: [
       Text(hi, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
+      if ((err != null || S.gErr != null) && shelves.values.every((l) => l.isEmpty)) Padding(padding: const EdgeInsets.symmetric(vertical: 24), child: Column(children: [
+        Text('Could not load music: ${S.gErr ?? err}', textAlign: TextAlign.center, style: const TextStyle(color: cMu)),
+        const SizedBox(height: 12),
+        FilledButton(onPressed: () async { if (S.token == null) await S.guest(); setState(load); }, child: const Text('Retry')),
+      ])),
       if (S.recent.isNotEmpty) ...[
         const SizedBox(height: 8),
         Wrap(spacing: 10, runSpacing: 10, children: [
@@ -323,7 +359,7 @@ class _HomeTabState extends State<HomeTab> {
           Padding(padding: const EdgeInsets.only(top: 22, bottom: 10), child: Text(q, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800))),
           SizedBox(height: 200, child: ListView.separated(scrollDirection: Axis.horizontal, itemCount: min(12, shelves[q]!.length), separatorBuilder: (_, __) => const SizedBox(width: 12), itemBuilder: (_, k) {
             final t = shelves[q]![k];
-            return GestureDetector(onTap: () => S.play(shelves[q]!, k), child: SizedBox(width: 140, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [pic(t.cover, size: 140, r: 10), const SizedBox(height: 8), Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)), Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: cMu, fontSize: 12))])));
+            return FadeIn(i: k, child: Press(onTap: () => S.play(shelves[q]!, k), child: SizedBox(width: 140, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [pic(t.cover, size: 140, r: 10), const SizedBox(height: 8), Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)), Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: cMu, fontSize: 12))]))));
           })),
         ],
     ]);
@@ -379,7 +415,7 @@ class MiniPlayer extends StatelessWidget {
     return InkWell(
       onTap: () => Navigator.push(c, MaterialPageRoute(fullscreenDialog: true, builder: (_) => const NowPlaying())),
       child: Container(color: const Color(0xFF03061A), padding: const EdgeInsets.fromLTRB(12, 8, 4, 8), child: Row(children: [
-        pic(t.cover, size: 44, r: 6), const SizedBox(width: 10),
+        Hero(tag: 'cover', child: pic(t.cover, size: 44, r: 6)), const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)), Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: cMu, fontSize: 12))])),
         PlayBtn(size: 30),
       ])),
@@ -422,12 +458,14 @@ class _NowPlayingState extends State<NowPlaying> {
                 Expanded(child: Column(children: [Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800)), Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: cMu, fontSize: 13))])),
                 IconButton(icon: Icon(Icons.lyrics_outlined, color: ly ? cAc2 : null), onPressed: () => setState(() => ly = !ly)),
               ]),
-              Expanded(child: ly ? const LyricsView() : Center(child: AspectRatio(aspectRatio: 1, child: pic(t.cover, r: 16)))),
+              Expanded(child: AnimatedSwitcher(duration: const Duration(milliseconds: 300), child: ly ? const LyricsView(key: ValueKey('ly')) : Center(key: const ValueKey('cv'), child: AspectRatio(aspectRatio: 1, child: StreamBuilder<bool>(
+                stream: handler.p.playingStream, initialData: false,
+                builder: (_, s) => AnimatedScale(scale: s.data == true ? 1 : .86, duration: const Duration(milliseconds: 450), curve: Curves.easeOutBack, child: Hero(tag: 'cover', child: pic(t.cover, r: 16)))))))),
               const SizedBox(height: 8),
               Row(children: [
                 if (ly) ActionChip(avatar: const Icon(Icons.translate, size: 18), label: Text(S.tl.isEmpty ? 'OFF' : S.tl.split('-')[0].toUpperCase()), onPressed: langSheet),
                 const Spacer(),
-                IconButton(icon: Icon(S.isLiked(t.id) ? Icons.favorite : Icons.favorite_border, color: S.isLiked(t.id) ? cAc2 : null), onPressed: () => S.toggleLike(t)),
+                IconButton(icon: heart(S.isLiked(t.id), Colors.white), onPressed: () => S.toggleLike(t)),
                 IconButton(icon: const Icon(Icons.download_outlined), tooltip: 'Save lyrics', onPressed: S.saveLyrics),
                 IconButton(icon: const Icon(Icons.share_outlined), onPressed: S.shareSong),
               ]),
@@ -479,7 +517,8 @@ class _LyricsViewState extends State<LyricsView> {
             key: keys[k], behavior: HitTestBehavior.opaque,
             onTap: syn ? () => handler.p.seek(Duration(milliseconds: (S.lines[k].t * 1000).toInt())) : null,
             child: Padding(padding: const EdgeInsets.only(bottom: 22), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(src[k], style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, height: 1.25, color: !syn || k == act ? Colors.white : Colors.white38)),
+              AnimatedScale(scale: !syn || k == act ? 1 : .94, alignment: Alignment.centerLeft, duration: const Duration(milliseconds: 300), curve: Curves.easeOut,
+                child: AnimatedDefaultTextStyle(duration: const Duration(milliseconds: 300), style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, height: 1.25, color: !syn || k == act ? Colors.white : Colors.white38), child: Text(src[k]))),
               if (S.tr != null && k < S.tr!.length && S.tr![k].isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(S.tr![k], style: TextStyle(fontSize: 17, color: !syn || k == act ? Colors.white : Colors.white30))),
             ])),
           ),
